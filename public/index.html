@@ -1,0 +1,60 @@
+
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SEO LLM – Generator (LLM Ready)</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="wrap">
+    <h1>SEO LLM – Document Generator (LLM)</h1>
+
+    <div class="card">
+      <label>URL del cliente</label>
+      <input id="siteUrl" type="url" placeholder="https://www.esempio.com" />
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <label>Ragione sociale (opzionale)</label>
+        <input id="company" type="text" placeholder="Nome azienda" />
+      </div>
+      <div class="card">
+        <label>Pacchetto</label>
+        <select id="mode">
+          <option value="b2b">B2B (6 mesi)</option>
+          <option value="hospitality">Ospitalità (3 mesi)</option>
+        </select>
+      </div>
+      <div class="card">
+        <label>Documento</label>
+        <select id="doctype">
+          <option value="offerta">Offerta (LLM)</option>
+          <option value="allegatoA">Allegato A (LLM)</option>
+          <option value="deliverables">Deliverable mese (LLM)</option>
+        </select>
+      </div>
+      <div class="card" id="monthBox" style="display:none">
+        <label>Mese</label>
+        <select id="month"></select>
+      </div>
+    </div>
+
+    <div class="card">
+      <label>Note/Priorità (opzionale)</label>
+      <textarea id="notes" rows="4" placeholder="Es. focus su prodotti X, evitare mercati esteri, ecc."></textarea>
+    </div>
+
+    <div class="actions">
+      <button id="btnGenerate">Genera</button>
+      <span id="spinner" class="spinner" style="display:none">Generazione contenuti personalizzati…</span>
+    </div>
+
+    <div id="msg" class="msg"></div>
+  </div>
+
+  <script src="main.js"></script>
+</body>
+</html>
