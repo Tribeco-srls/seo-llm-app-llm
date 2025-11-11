@@ -1,4 +1,3 @@
-\
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
@@ -17,7 +16,6 @@ const LLM_BASE_URL   = process.env.LLM_BASE_URL || 'https://api.openai.com/v1';
 const LLM_MODEL      = process.env.LLM_MODEL || 'gpt-4.1';
 const LLM_API_KEY    = process.env.LLM_API_KEY || '';
 const LLM_API_STYLE  = (process.env.LLM_API_STYLE || 'auto').toLowerCase(); // auto | responses | chat
-const USE_REASONING  = /^true$/i.test(process.env.USE_REASONING || ''); // non usato se non supportato
 
 app.use(express.json({ limit: '4mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
@@ -160,7 +158,7 @@ async function callLLM_JSON(systemPrompt, userPrompt) {
 
   async function tryResponses() {
     const body = { model: LLM_MODEL, input: `${sys}\n\nUSER:\n${userPrompt}` };
-    const url = `${LLM_BASE_URL}/responses`;
+    const url = `${LLM_BASE_URL}/responses";
     const r = await axios.post(url, body, { headers, timeout: 60000 });
     const data = r.data;
     const text = data.output_text || data.content?.[0]?.text || data.output?.[0]?.content?.[0]?.text || "";
