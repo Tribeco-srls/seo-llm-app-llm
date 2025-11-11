@@ -1,4 +1,4 @@
-
+\
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
@@ -12,15 +12,17 @@ const {
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ====== CONFIG LLM ======
-const LLM_BASE_URL = process.env.LLM_BASE_URL || 'https://api.openai.com/v1';
-const LLM_MODEL   = process.env.LLM_MODEL || 'gpt-4.1';
-const LLM_API_KEY = process.env.LLM_API_KEY || '';
-const USE_REASONING = /^true$/i.test(process.env.USE_REASONING || 'true');
+// ====== CONFIG LLM (robusta, con auto-endpoint) ======
+const LLM_BASE_URL   = process.env.LLM_BASE_URL || 'https://api.openai.com/v1';
+const LLM_MODEL      = process.env.LLM_MODEL || 'gpt-4.1';
+const LLM_API_KEY    = process.env.LLM_API_KEY || '';
+const LLM_API_STYLE  = (process.env.LLM_API_STYLE || 'auto').toLowerCase(); // auto | responses | chat
+const USE_REASONING  = /^true$/i.test(process.env.USE_REASONING || ''); // non usato se non supportato
 
 app.use(express.json({ limit: '4mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
+// ====== Utils DOCX ======
 function buildHeaderLogoParagraph() {
   const logoPath = path.join(__dirname, 'public', 'logo.png');
   if (fs.existsSync(logoPath)) {
@@ -32,27 +34,18 @@ function buildHeaderLogoParagraph() {
   }
   return new Paragraph({ text: "" });
 }
-
 function p(text) { return new Paragraph({ children: [ new TextRun({ text }) ] }); }
 function pBold(text) { return new Paragraph({ children: [ new TextRun({ text, bold: true }) ] }); }
 function pTitle(text) { return new Paragraph({ text, heading: HeadingLevel.HEADING_1 }); }
 function pSubtitle(text) { return new Paragraph({ text, heading: HeadingLevel.HEADING_2 }); }
-function pNumberedBold(number, rest) { return new Paragraph({ children: [ new TextRun({ text: `${number} – `, bold: true }), new TextRun({ text: rest }) ] }); }
-
 function makeDoc(children) {
   return new Document({
-    styles: {
-      default: {
-        document: {
-          run: { font: "Arial", size: 22 },
-          paragraph: { spacing: { after: 120 } }
-        }
-      }
-    },
+    styles: { default: { document: { run: { font: "Arial", size: 22 }, paragraph: { spacing: { after: 120 } } } } },
     sections: [{ children }]
   });
 }
 
+// ====== Analisi sito ======
 async function analyzeSite(url) {
   const html = await axios.get(url, {
     timeout: 15000,
@@ -70,41 +63,7 @@ async function analyzeSite(url) {
   return { url, title, description, h1, h2, navTexts };
 }
 
-async function callLLM_JSON(systemPrompt, userPrompt) {
-  if (!LLM_API_KEY) throw new Error("LLM_API_KEY non impostata.");
-
-  const body = {
-    model: LLM_MODEL,
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt }
-    ],
-    temperature: 0.2,
-    response_format: { type: "json_object" }
-  };
-  if (USE_REASONING) body.reasoning = { effort: "high" };
-
-  const resp = await axios.post(`${LLM_BASE_URL}/chat/completions`, body, {
-    headers: { "Authorization": `Bearer ${LLM_API_KEY}`, "Content-Type": "application/json" },
-    timeout: 60000
-  });
-
-  const txt = resp.data?.choices?.[0]?.message?.content || "";
-  let json;
-  try { json = JSON.parse(txt); } catch(e){ throw new Error("LLM: JSON non valido: " + txt.slice(0, 400)); }
-  return json;
-}
-
-app.get('/health', (_, res) => res.json({ ok: true, model: LLM_MODEL, llm: !!LLM_API_KEY }));
-
-app.post('/api/analyze', async (req, res) => {
-  try {
-    const { url } = req.body || {};
-    if (!url) return res.status(400).json({ error: 'URL mancante' });
-    res.json(await analyzeSite(url));
-  } catch (e) { res.status(502).json({ error: e.message }); }
-});
-
+// ====== Prompt builders ======
 function buildOffertaPrompt({ company, site, analysis, mode, notes }) {
   const sectorHint = analysis?.navTexts?.slice(0,8).join(" • ");
   return `Sei un consulente esperto di SEO tradizionale e SEO per LLM.
@@ -173,6 +132,92 @@ Rispondi SOLO JSON con schema:
 Regole: quantità esplicite, tono tecnico-chiaro, niente promesse, settore coerente.`;
 }
 
+// ====== LLM core (auto-endpoint + diagnostica chiara) ======
+function parseJSONorThrow(raw) {
+  try { return JSON.parse(raw); } catch (_) {}
+  const a = raw.indexOf("{"), b = raw.lastIndexOf("}");
+  if (a >= 0 && b > a) {
+    const slice = raw.slice(a, b+1);
+    try { return JSON.parse(slice); } catch (_) {}
+  }
+  throw new Error("LLM: risposta non-JSON. Preview: " + raw.slice(0, 400));
+}
+function decorateProviderError(err, where) {
+  if (err.response) {
+    return new Error(`LLM(${where}) ${err.response.status}: ${JSON.stringify(err.response.data)}`);
+  }
+  return err;
+}
+async function callLLM_JSON(systemPrompt, userPrompt) {
+  if (!LLM_API_KEY) throw new Error("LLM_API_KEY non impostata.");
+
+  const sys = [
+    systemPrompt,
+    "IMPORTANT: Return ONLY one valid JSON object. No prose before/after."
+  ].join("\n");
+
+  const headers = { "Authorization": `Bearer ${LLM_API_KEY}`, "Content-Type": "application/json" };
+
+  async function tryResponses() {
+    const body = { model: LLM_MODEL, input: `${sys}\n\nUSER:\n${userPrompt}` };
+    const url = `${LLM_BASE_URL}/responses`;
+    const r = await axios.post(url, body, { headers, timeout: 60000 });
+    const data = r.data;
+    const text = data.output_text || data.content?.[0]?.text || data.output?.[0]?.content?.[0]?.text || "";
+    return parseJSONorThrow(text);
+  }
+
+  async function tryChat() {
+    const body = {
+      model: LLM_MODEL,
+      messages: [
+        { role: "system", content: sys },
+        { role: "user", content: userPrompt }
+      ],
+      temperature: 0.2
+    };
+    const url = `${LLM_BASE_URL}/chat/completions`;
+    const r = await axios.post(url, body, { headers, timeout: 60000 });
+    const text = r.data?.choices?.[0]?.message?.content || "";
+    return parseJSONorThrow(text);
+  }
+
+  try {
+    if (LLM_API_STYLE === 'responses') return await tryResponses();
+    if (LLM_API_STYLE === 'chat') return await tryChat();
+    try { return await tryResponses(); }
+    catch (e1) {
+      if (e1.response) { const s = e1.response.status; if (s === 400 || s === 404) { try { return await tryChat(); } catch (e2) { throw decorateProviderError(e2, "chat"); } } }
+      throw decorateProviderError(e1, "responses");
+    }
+  } catch (e) { throw e; }
+}
+
+// ====== Health & diagnostics ======
+app.get('/health', (_, res) => res.json({ ok: true, model: LLM_MODEL, llm: !!LLM_API_KEY, style: LLM_API_STYLE }));
+
+app.get('/api/llm/diagnostics', async (req, res) => {
+  try {
+    const j = await callLLM_JSON(
+      "You return only valid JSON with a field 'ok' and 'model'.",
+      "Respond with {\"ok\": true, \"model\": \"" + LLM_MODEL + "\"}"
+    );
+    res.json({ ok: true, via: LLM_API_STYLE, model: LLM_MODEL, llm_json: j });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// ====== API base ======
+app.post('/api/analyze', async (req, res) => {
+  try {
+    const { url } = req.body || {};
+    if (!url) return res.status(400).json({ error: 'URL mancante' });
+    res.json(await analyzeSite(url));
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// ====== Renderers DOCX ======
 function renderOffertaDoc(json, companyLabel) {
   const children = [];
   children.push(buildHeaderLogoParagraph());
@@ -202,7 +247,6 @@ function renderOffertaDoc(json, companyLabel) {
   const doc = makeDoc(children);
   return Packer.toBuffer(doc);
 }
-
 function renderDeliverablesDoc(json, companyLabel, month) {
   const children = [];
   children.push(buildHeaderLogoParagraph());
@@ -219,6 +263,7 @@ function renderDeliverablesDoc(json, companyLabel, month) {
   return Packer.toBuffer(doc);
 }
 
+// ====== API LLM docs ======
 app.post('/api/llm/offerta', async (req, res) => {
   try {
     const { site, company = "", mode = "b2b", notes = "" } = req.body || {};
@@ -271,8 +316,7 @@ app.post('/api/llm/deliverables', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.get('/health', (_, res) => res.json({ ok: true }));
-
+// ====== SPA fallback ======
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 app.listen(PORT, () => console.log(`Server up on http://localhost:${PORT}, LLM=${LLM_MODEL}`));
