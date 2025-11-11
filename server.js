@@ -12,7 +12,7 @@ const PORT = process.env.PORT || 3000;
 const LLM_BASE_URL  = process.env.LLM_BASE_URL || 'https://api.openai.com/v1';
 const LLM_MODEL     = process.env.LLM_MODEL || 'gpt-4.1';
 const LLM_API_KEY   = process.env.LLM_API_KEY || '';
-const LLM_API_STYLE = (process.env.LLM_API_STYLE || 'auto').toLowerCase();
+const LLM_API_STYLE = (process.env.LLM_API_STYLE || 'auto').toLowerCase(); // auto | responses | chat
 
 app.use(express.json({ limit: '4mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
@@ -120,7 +120,7 @@ function buildDeliverablesPrompt(company, site, analysis, mode, month, notes){
   return out;
 }
 
-// ---------- LLM CORE ----------
+// ---------- JSON PARSER ----------
 function parseJSONorThrow(raw){
   try { return JSON.parse(raw); } catch(e){}
   const a = raw.indexOf('{');
@@ -132,28 +132,20 @@ function parseJSONorThrow(raw){
   throw new Error('LLM: risposta non-JSON. Preview: ' + raw.slice(0,400));
 }
 function decorateProviderError(err, where){
-  if (err.response){
+  if (err && err.response){
     return new Error('LLM(' + where + ') ' + err.response.status + ': ' + JSON.stringify(err.response.data));
   }
   return err;
 }
-async function callLLM_JSON(systemPrompt, userPrompt) {
+
+// ---------- LLM CORE ----------
+async function callLLM_JSON(systemPrompt, userPrompt){
   if (!LLM_API_KEY) throw new Error('LLM_API_KEY non impostata.');
   const sys = systemPrompt + '\nIMPORTANT: Return ONLY one valid JSON object. No prose before/after.';
   const base = (LLM_BASE_URL || '').replace(/\/+$/, '');
-  const headers = { 'Authorization': 'Bearer ' + LLM_API_KEY, 'Content-Type': 'application/json' };
+  const headers = { 'Authorization':'Bearer ' + LLM_API_KEY, 'Content-Type':'application/json' };
 
-  function parseJSONorThrow(raw) {
-    try { return JSON.parse(raw); } catch (_) {}
-    const a = raw.indexOf('{'), b = raw.lastIndexOf('}');
-    if (a >= 0 && b > a) {
-      const slice = raw.slice(a, b + 1);
-      try { return JSON.parse(slice); } catch (_) {}
-    }
-    throw new Error('LLM: risposta non-JSON. Preview: ' + raw.slice(0, 400));
-  }
-
-  async function tryResponses() {
+  async function tryResponses(){
     const body = { model: LLM_MODEL, input: sys + '\n\nUSER:\n' + userPrompt };
     const url = base + '/responses';
     const r = await axios.post(url, body, { headers: headers, timeout: 60000 });
@@ -161,15 +153,15 @@ async function callLLM_JSON(systemPrompt, userPrompt) {
     const candidates = [];
     if (typeof d.output_text === 'string') candidates.push(d.output_text);
     if (Array.isArray(d.content) && d.content[0] && typeof d.content[0].text === 'string') candidates.push(d.content[0].text);
-    const text = candidates.find(t => t && t.trim().length > 0) || '';
+    const text = candidates.find(function(t){ return t && t.trim().length > 0; }) || '';
     if (!text) throw new Error('empty_output_from_responses');
     return parseJSONorThrow(text);
   }
 
-  async function tryChat() {
+  async function tryChat(){
     const body = {
       model: LLM_MODEL,
-      messages: [{ role: 'system', content: sys }, { role: 'user', content: userPrompt }],
+      messages: [{ role:'system', content: sys }, { role:'user', content: userPrompt }],
       temperature: 0.2
     };
     const url = base + '/chat/completions';
@@ -180,53 +172,18 @@ async function callLLM_JSON(systemPrompt, userPrompt) {
   }
 
   // forza lo stile se specificato
-  if (LLM_API_STYLE === 'responses') { try { return await tryResponses(); } catch (e) { throw (e.response ? new Error('LLM(responses) ' + e.response.status + ': ' + JSON.stringify(e.response.data)) : e); } }
-  if (LLM_API_STYLE === 'chat')      { try { return await tryChat();      } catch (e) { throw (e.response ? new Error('LLM(chat) ' + e.response.status + ': ' + JSON.stringify(e.response.data))      : e); } }
+  if (LLM_API_STYLE === 'responses') { try { return await tryResponses(); } catch (e) { throw decorateProviderError(e, 'responses'); } }
+  if (LLM_API_STYLE === 'chat')      { try { return await tryChat();      } catch (e) { throw decorateProviderError(e, 'chat'); } }
 
   // auto-fallback
   try { return await tryResponses(); }
   catch (e1) {
     if (e1.message === 'empty_output_from_responses' || (e1.response && (e1.response.status === 400 || e1.response.status === 404))) {
       try { return await tryChat(); }
-      catch (e2) { throw (e2.response ? new Error('LLM(chat) ' + e2.response.status + ': ' + JSON.stringify(e2.response.data)) : e2); }
+      catch (e2) { throw decorateProviderError(e2, 'chat'); }
     }
-    throw (e1.response ? new Error('LLM(responses) ' + e1.response.status + ': ' + JSON.stringify(e1.response.data)) : e1);
+    throw decorateProviderError(e1, 'responses');
   }
-}
-
-
-  async function tryResponses(){
-    const body = { model: LLM_MODEL, input: sys + '\n\nUSER:\n' + userPrompt };
-    const url = LLM_BASE_URL + '/responses';
-    const r = await axios.post(url, body, { headers: headers, timeout: 60000 });
-    const data = r.data || {};
-    const text = data.output_text || (data.content && data.content[0] && data.content[0].text) || '';
-    return parseJSONorThrow(text);
-  }
-
-  async function tryChat(){
-    const body = { model: LLM_MODEL, messages: [ { role:'system', content: sys }, { role:'user', content: userPrompt } ], temperature: 0.2 };
-    const url = LLM_BASE_URL + '/chat/completions';
-    const r = await axios.post(url, body, { headers: headers, timeout: 60000 });
-    const text = (r.data && r.data.choices && r.data.choices[0] && r.data.choices[0].message && r.data.choices[0].message.content) || '';
-    return parseJSONorThrow(text);
-  }
-
-  try{
-    if (LLM_API_STYLE === 'responses') return await tryResponses();
-    if (LLM_API_STYLE === 'chat') return await tryChat();
-    try { return await tryResponses(); }
-    catch(e1){
-      if (e1.response){
-        const s = e1.response.status;
-        if (s === 400 || s === 404){
-          try { return await tryChat(); }
-          catch(e2){ throw decorateProviderError(e2, 'chat'); }
-        }
-      }
-      throw decorateProviderError(e1, 'responses');
-    }
-  } catch(e){ throw e; }
 }
 
 // ---------- HEALTH ----------
